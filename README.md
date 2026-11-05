@@ -133,6 +133,17 @@ Through this project, I aim to improve my ability to:
 - Use Git and GitHub for version control.
 - Document and maintain a software project.
 
+  ## Last Update 11/5/2026
+
+New Features:
+
+User Profile: First-time users can enter their name, age, and BMI.
+Workout Logging: Users can record and save their exercises, including weight, sets, and reps.
+Daily Workout Summary: Users can review all workouts completed throughout the day.
+Workout History: Users can access previously saved workouts to track their progress over time.
+Next Goal: Continue improving the user interface and adding more advanced fitness tracking features.
+  
+
 
 ## 🚀 Final Goal
 
