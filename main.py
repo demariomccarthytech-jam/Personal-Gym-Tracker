@@ -157,6 +157,7 @@ def migrate_legacy_workouts(user_id):
             session_id = sessions_by_day.get(workout_date)
             if session_id is None:
                 session = connection.execute(
+
                     """
                     SELECT id FROM workout_sessions
                     WHERE user_id = ? AND session_name = ? AND workout_date = ?
