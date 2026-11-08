@@ -137,11 +137,13 @@ Through this project, I aim to improve my ability to:
 
 New Features:
 
-User Profile: First-time users can enter their name, age, and BMI.
-Workout Logging: Users can record and save their exercises, including weight, sets, and reps.
-Daily Workout Summary: Users can review all workouts completed throughout the day.
-Workout History: Users can access previously saved workouts to track their progress over time.
-Next Goal: Continue improving the user interface and adding more advanced fitness tracking features.
+Able to sign in to your user profile and create a new one if your new.
+Can manage workouts, delete and clear your workout history.
+
+Next steps:
+
+Being able to create a schedule.
+Also being able to add and modify old and new workouts.
   
 
 
