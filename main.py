@@ -34,6 +34,7 @@ def create_tables():
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
+                special_word TEXT NOT NULL DEFAULT '',
                 date_of_birth TEXT NOT NULL,
                 weight_lbs REAL NOT NULL,
                 height_inches REAL NOT NULL,
@@ -41,6 +42,13 @@ def create_tables():
             )
             """
         )
+        user_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(users)")
+        }
+        if "special_word" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN special_word TEXT NOT NULL DEFAULT ''"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS workout_sessions (
@@ -95,43 +103,101 @@ def calculate_bmi(weight_lbs, height_inches):
 
 
 def get_or_create_user():
-    """Load the local account or ask for profile details on first launch."""
-    with connect_to_database() as connection:
-        user = connection.execute(
-            "SELECT id, name, date_of_birth, weight_lbs, height_inches "
-            "FROM users ORDER BY id LIMIT 1"
-        ).fetchone()
+    """Sign in to an existing profile or create a new local profile."""
+    while True:
+        action = Prompt.ask(
+            "Welcome! Choose 1) Sign in  2) Create a new profile",
+            choices=["1", "2"],
+        )
+        if action == "1":
+            name = ask_for_text("Enter your full name")
+            special_word = ask_for_text("Enter your special word")
+            with connect_to_database() as connection:
+                user = connection.execute(
+                    "SELECT id, name, date_of_birth, weight_lbs, height_inches "
+                    "FROM users WHERE name = ? COLLATE NOCASE "
+                    "AND special_word = ? COLLATE NOCASE",
+                    (name, special_word),
+                ).fetchone()
+                if user is None:
+                    legacy_user = connection.execute(
+                        "SELECT id, name, date_of_birth, weight_lbs, height_inches "
+                        "FROM users WHERE name = ? COLLATE NOCASE AND special_word = ''",
+                        (name,),
+                    ).fetchone()
+                    if legacy_user and Prompt.ask(
+                        "This existing profile needs a special word for sign-in. Save "
+                        "the one you entered?",
+                        choices=["y", "n"],
+                        default="y",
+                    ) == "y":
+                        connection.execute(
+                            "UPDATE users SET special_word = ? WHERE id = ?",
+                            (special_word, legacy_user[0]),
+                        )
+                        user = legacy_user
 
-        if user is None:
-            console.print(Panel("Let’s get you started! 🚀", border_style="cyan"))
-            name = ask_for_text("Enter your Full Name")
-            while True:
-                date_text = ask_for_text("Date of birth (YYYY-MM-DD)")
-                try:
-                    birth_date = date.fromisoformat(date_text)
-                except ValueError:
-                    console.print("Use the date format YYYY-MM-DD.", style="yellow")
-                    continue
-                if birth_date >= date.today():
-                    console.print("Please Re-enter your date of birth", style="yellow")
-                    continue
-                break
-            weight_lbs = ask_for_number("Current weight (lbs)")
-            height_feet = ask_for_whole_number("Height, feet")
+            if user is None:
+                console.print(
+                    "No matching profile found. Choose Create a new profile to get started.",
+                    style="yellow",
+                )
+                continue
+            console.print(f"Welcome back, {user[1]}!", style="bold green")
+            break
+
+        console.print(Panel("Let’s get you started! 🚀", border_style="cyan"))
+        name = ask_for_text("Enter your Full Name")
+        special_word = ask_for_text("Create your special word for sign-in")
+        with connect_to_database() as connection:
+            existing_user = connection.execute(
+                "SELECT name FROM users WHERE name = ? COLLATE NOCASE "
+                "AND special_word = ? COLLATE NOCASE",
+                (name, special_word),
+            ).fetchone()
+        if existing_user:
+            console.print(
+                "That profile already exists. Choose Sign in to open it.",
+                style="yellow",
+            )
+            continue
+
+        while True:
+            date_text = ask_for_text("Date of birth (YYYY-MM-DD)")
+            try:
+                birth_date = date.fromisoformat(date_text)
+            except ValueError:
+                console.print("Use the date format YYYY-MM-DD.", style="yellow")
+                continue
+            if birth_date >= date.today():
+                console.print("Please Re-enter your date of birth", style="yellow")
+                continue
+            break
+        weight_lbs = ask_for_number("Current weight (lbs)")
+        height_feet = ask_for_whole_number("Height, feet")
+        height_remainder = ask_for_whole_number(
+            "Height, remaining inches", allow_zero=True
+        )
+        while height_remainder > 11:
+            console.print("Enter 0 through 11 inches.", style="yellow")
             height_remainder = ask_for_whole_number(
                 "Height, remaining inches", allow_zero=True
             )
-            while height_remainder > 11:
-                console.print("Enter 0 through 11 inches.", style="yellow")
-                height_remainder = ask_for_whole_number(
-                    "Height, remaining inches", allow_zero=True
-                )
-            height_inches = height_feet * 12 + height_remainder
-            created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        height_inches = height_feet * 12 + height_remainder
+        created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        with connect_to_database() as connection:
             cursor = connection.execute(
-                "INSERT INTO users (name, date_of_birth, weight_lbs, height_inches, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (name, birth_date.isoformat(), weight_lbs, height_inches, created_at),
+                "INSERT INTO users "
+                "(name, special_word, date_of_birth, weight_lbs, height_inches, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    name,
+                    special_word,
+                    birth_date.isoformat(),
+                    weight_lbs,
+                    height_inches,
+                    created_at,
+                ),
             )
             user = (
                 cursor.lastrowid,
@@ -140,8 +206,15 @@ def get_or_create_user():
                 weight_lbs,
                 height_inches,
             )
+        console.print(f"Welcome to your new profile, {name}!", style="bold green")
+        break
 
-    migrate_legacy_workouts(user[0])
+    with connect_to_database() as connection:
+        first_user = connection.execute(
+            "SELECT id FROM users ORDER BY id LIMIT 1"
+        ).fetchone()
+    if first_user and user[0] == first_user[0]:
+        migrate_legacy_workouts(user[0])
     return user
 
 
@@ -454,41 +527,128 @@ def view_saved_workouts(user):
     console.print(Panel(summary, title="Workout Summary", border_style="green"))
 
 
+def manage_workout_history(user):
+    """View or delete workout sessions, or clear this user's history."""
+    while True:
+        action = Prompt.ask(
+            "Manage workouts: 1) View history  2) Delete a workout  "
+            "3) Clear all history  4) Back",
+            choices=["1", "2", "3", "4"],
+        )
+        if action == "4":
+            return
+        if action == "1":
+            view_saved_workouts(user)
+            continue
+        if action == "3":
+            if Prompt.ask(
+                "Delete all of your workout history? This cannot be undone",
+                choices=["y", "n"],
+                default="n",
+            ) == "y":
+                with connect_to_database() as connection:
+                    connection.execute(
+                        "DELETE FROM workouts WHERE user_id = ?", (user[0],)
+                    )
+                    connection.execute(
+                        "DELETE FROM workout_sessions WHERE user_id = ?", (user[0],)
+                    )
+                console.print("Workout history cleared.", style="bold green")
+            continue
+
+        with connect_to_database() as connection:
+            sessions = connection.execute(
+                """
+                SELECT s.id, s.workout_date, s.session_name, COUNT(w.id)
+                FROM workout_sessions AS s
+                LEFT JOIN workouts AS w ON w.session_id = s.id
+                WHERE s.user_id = ?
+                GROUP BY s.id
+                ORDER BY s.workout_date DESC, s.id DESC
+                """,
+                (user[0],),
+            ).fetchall()
+
+        if not sessions:
+            console.print("There are no workouts to delete.", style="yellow")
+            continue
+
+        console.print("\nWorkout sessions:")
+        for index, (
+            _,
+            workout_date,
+            session_name,
+            exercise_count,
+        ) in enumerate(sessions, 1):
+            console.print(
+                f"{index}. {workout_date} — {session_name} ({exercise_count} exercises)"
+            )
+        choices = [str(index) for index in range(1, len(sessions) + 1)] + ["0"]
+        selected = Prompt.ask("Choose a workout to delete (0 to cancel)", choices=choices)
+        if selected == "0":
+            continue
+
+        session_id, workout_date, session_name, _ = sessions[int(selected) - 1]
+        if Prompt.ask(
+            f"Delete {session_name} from {workout_date} and all its exercises?",
+            choices=["y", "n"],
+            default="n",
+        ) != "y":
+            continue
+        with connect_to_database() as connection:
+            connection.execute(
+                "DELETE FROM workouts WHERE session_id = ? AND user_id = ?",
+                (session_id, user[0]),
+            )
+            connection.execute(
+                "DELETE FROM workout_sessions WHERE id = ? AND user_id = ?",
+                (session_id, user[0]),
+            )
+        console.print("Workout deleted.", style="bold green")
+
+
 def show_menu():
     """Print the program's main menu."""
     menu = Table.grid(padding=(0, 2))
     menu.add_column(style="bold cyan")
     menu.add_column()
     menu.add_row("1", "Add a workout")
-    menu.add_row("2", "View workout history")
+    menu.add_row("2", "Manage workouts")
     menu.add_row("3", "View profile")
     menu.add_row("4", "Exit")
+    menu.add_row("5", "Sign out / switch user")
     console.print(Panel(menu, title="Personal Gym Tracker", border_style="blue"))
 
 
 def main():
-    """Set up storage and run the menu until the user chooses to exit."""
+    """Run the app until the user exits, allowing profile switching."""
     create_tables()
-    user = get_or_create_user()
-    display_profile(user)
-    console.print("Welcome to your Personal Gym Tracker!", style="bold green")
-
     while True:
-        show_menu()
-        choice = Prompt.ask("Choose an option", choices=["1", "2", "3", "4"])
+        user = get_or_create_user()
+        display_profile(user)
+        console.print("Welcome to your Personal Gym Tracker!", style="bold green")
 
-        if choice == "1":
-            add_workout(user)
-        elif choice == "2":
-            view_saved_workouts(user)
-        elif choice == "3":
-            display_profile(user)
-        elif choice == "4":
-            console.print(
-                "Every rep counts. Keep pushing! 💪 See you next session.",
-                style="bold green",
+        while True:
+            show_menu()
+            choice = Prompt.ask(
+                "Choose an option", choices=["1", "2", "3", "4", "5"]
             )
-            break
+
+            if choice == "1":
+                add_workout(user)
+            elif choice == "2":
+                manage_workout_history(user)
+            elif choice == "3":
+                display_profile(user)
+            elif choice == "4":
+                console.print(
+                    "Every rep counts. Keep pushing! 💪 See you next session.",
+                    style="bold green",
+                )
+                return
+            elif choice == "5":
+                console.print("Returning to sign in...", style="cyan")
+                break
 
 
 # This check means main() runs when this file is launched directly, but not
