@@ -1,5 +1,6 @@
 """A local gym tracker for user profiles and grouped workout sessions."""
 
+import random
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -13,6 +14,19 @@ from rich.text import Text
 
 
 console = Console()
+
+RETURNING_USER_GREETINGS = (
+    "Welcome back, {name}. Ready to level up?",
+    "Another day, another opportunity to get stronger.",
+    "Good to have you back, {name}.",
+    "Let's get to work, {name}.",
+    "Every rep counts. Let's keep building.",
+    "You're showing up. That's what matters.",
+    "Time to put in the work.",
+    "What's good, {name}? Ready to train?",
+    "Consistency builds results. Let's get after it.",
+    "Your next session starts here.",
+)
 
 # Store the database beside this Python file so it is easy to find and back up.
 # SQLite is included with Python, so it needs no separate dependency.
@@ -67,6 +81,7 @@ def create_tables():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 exercise_name TEXT NOT NULL,
                 weight_lbs REAL NOT NULL,
+                is_bodyweight INTEGER NOT NULL DEFAULT 0,
                 sets INTEGER NOT NULL,
                 reps_per_set INTEGER NOT NULL,
                 total_reps INTEGER NOT NULL,
@@ -87,6 +102,11 @@ def create_tables():
                 "ALTER TABLE workouts ADD COLUMN session_id INTEGER "
                 "REFERENCES workout_sessions(id)"
             )
+        if "is_bodyweight" not in workout_columns:
+            connection.execute(
+                "ALTER TABLE workouts ADD COLUMN is_bodyweight "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def calculate_age(date_of_birth, today=None):
@@ -100,6 +120,17 @@ def calculate_age(date_of_birth, today=None):
 def calculate_bmi(weight_lbs, height_inches):
     """Calculate BMI from pounds and inches."""
     return weight_lbs * 703 / (height_inches * height_inches)
+
+
+def get_bmi_category(bmi):
+    """Return a simple BMI category using fixed numeric ranges."""
+    if bmi < 18.5:
+        return "Underweight"
+    if bmi < 25:
+        return "Healthy weight"
+    if bmi < 30:
+        return "Overweight"
+    return "Obesity"
 
 
 def get_or_create_user():
@@ -143,7 +174,8 @@ def get_or_create_user():
                     style="yellow",
                 )
                 continue
-            console.print(f"Welcome back, {user[1]}!", style="bold green")
+            greeting = random.choice(RETURNING_USER_GREETINGS).format(name=user[1])
+            console.print(greeting, style="bold green")
             break
 
         console.print(Panel("Let’s get you started! 🚀", border_style="cyan"))
@@ -260,16 +292,19 @@ def display_profile(user):
     """Show account details and the calculated BMI."""
     _, name, date_of_birth, weight_lbs, height_inches = user
     birth_date = date.fromisoformat(date_of_birth)
+    age = calculate_age(birth_date)
+    bmi = calculate_bmi(weight_lbs, height_inches)
     details = Table.grid(padding=(0, 2))
     details.add_column(style="dim")
     details.add_column(style="bold")
     details.add_row("Date of birth", birth_date.isoformat())
-    details.add_row("Age", f"{calculate_age(birth_date)} years")
+    details.add_row("Age", f"{age} years")
     details.add_row("Weight", f"{format_weight(weight_lbs)} lbs")
     details.add_row(
         "Height", f"{int(height_inches // 12)} ft {int(height_inches % 12)} in"
     )
-    details.add_row("BMI", f"{calculate_bmi(weight_lbs, height_inches):.1f}")
+    details.add_row("BMI", f"{bmi:.1f}")
+    details.add_row("BMI category", get_bmi_category(bmi))
     console.print(
         Panel(
             details,
@@ -277,12 +312,99 @@ def display_profile(user):
             border_style="green",
         )
     )
+    console.print("BMI is a screening measure, not a diagnosis.", style="dim")
 
 
-def ask_for_text(prompt):
+def edit_profile(user):
+    """Update the signed-in user's profile details and return the saved profile."""
+    user_id, name, date_of_birth, weight_lbs, height_inches = user
+    console.print("Leave a field blank to keep its current value.", style="dim")
+
+    name = ask_for_text("Full name", default=name)
+    birth_date = date.fromisoformat(date_of_birth)
+    while True:
+        date_text = Prompt.ask(
+            "Date of birth (YYYY-MM-DD)", default=birth_date.isoformat()
+        ).strip()
+        try:
+            updated_birth_date = date.fromisoformat(date_text)
+        except ValueError:
+            console.print("Use the date format YYYY-MM-DD.", style="yellow")
+            continue
+        if updated_birth_date >= date.today():
+            console.print("Date of birth must be in the past.", style="yellow")
+            continue
+        break
+
+    weight_lbs = ask_for_number("Current weight (lbs)", default=weight_lbs)
+    height_feet = ask_for_whole_number(
+        "Height, feet", default=int(height_inches // 12)
+    )
+    height_remainder = ask_for_whole_number(
+        "Height, remaining inches",
+        allow_zero=True,
+        default=int(height_inches % 12),
+    )
+    while height_remainder > 11:
+        console.print("Enter 0 through 11 inches.", style="yellow")
+        height_remainder = ask_for_whole_number(
+            "Height, remaining inches",
+            allow_zero=True,
+            default=int(height_inches % 12),
+        )
+    height_inches = height_feet * 12 + height_remainder
+
+    with connect_to_database() as connection:
+        connection.execute(
+            "UPDATE users SET name = ?, date_of_birth = ?, weight_lbs = ?, "
+            "height_inches = ? WHERE id = ?",
+            (
+                name,
+                updated_birth_date.isoformat(),
+                weight_lbs,
+                height_inches,
+                user_id,
+            ),
+        )
+
+    updated_user = (
+        user_id,
+        name,
+        updated_birth_date.isoformat(),
+        weight_lbs,
+        height_inches,
+    )
+    console.print("Profile updated successfully.", style="bold green")
+    display_profile(updated_user)
+    return updated_user
+
+
+def view_profile(user):
+    """Display the profile and let the user edit it or return to the menu."""
+    display_profile(user)
+    menu = Table.grid(padding=(0, 2))
+    menu.add_column(style="bold cyan")
+    menu.add_column()
+    menu.add_row("1", "Edit profile")
+    menu.add_row("2", "Back to main menu")
+    console.print(Panel(menu, title="Profile options", border_style="blue"))
+    action = Prompt.ask(
+        "Choose an option",
+        choices=["1", "2"],
+    )
+    if action == "1":
+        return edit_profile(user)
+    return user
+
+
+def ask_for_text(prompt, default=None):
     """Ask for text until the user enters something other than blank space."""
     while True:
-        answer = Prompt.ask(prompt.rstrip().removesuffix(":")).strip()
+        answer = Prompt.ask(
+            prompt.rstrip().removesuffix(":"),
+            default=None if default is None else str(default),
+        )
+        answer = (answer or "").strip()
         if answer:
             return answer
         console.print(
@@ -290,14 +412,18 @@ def ask_for_text(prompt):
         )
 
 
-def ask_for_number(prompt, allow_zero=False):
+def ask_for_number(prompt, allow_zero=False, default=None):
     """Read a number and keep asking if the input is invalid.
 
-    Weight may be zero (for bodyweight or assisted exercise notes), but sets
-    and reps must be positive numbers. This helper handles both cases.
+    Set allow_zero when a field can legitimately be zero. Sets and reps use
+    the whole-number helper and must be positive.
     """
     while True:
-        answer = Prompt.ask(prompt.rstrip().removesuffix(":")).strip()
+        answer = Prompt.ask(
+            prompt.rstrip().removesuffix(":"),
+            default=None if default is None else str(default),
+        )
+        answer = (answer or "").strip()
         try:
             number = float(answer)
         except ValueError:
@@ -315,10 +441,14 @@ def ask_for_number(prompt, allow_zero=False):
         return number
 
 
-def ask_for_whole_number(prompt, allow_zero=False):
+def ask_for_whole_number(prompt, allow_zero=False, default=None):
     """Read a whole number, requiring positive values unless zero is allowed."""
     while True:
-        answer = Prompt.ask(prompt.rstrip().removesuffix(":")).strip()
+        answer = Prompt.ask(
+            prompt.rstrip().removesuffix(":"),
+            default=None if default is None else str(default),
+        )
+        answer = (answer or "").strip()
         try:
             number = int(answer)
         except ValueError:
@@ -337,7 +467,12 @@ def collect_exercise():
     """Ask for exercise details and calculate the exercise totals."""
     console.print("\n[bold cyan]Let's get your Workout Logged!!![/bold cyan]")
     exercise_name = ask_for_text("Exercise name: ")
-    weight_lbs = ask_for_number("Weight lifted (lbs): ", allow_zero=True)
+    weight_lbs = ask_for_number(
+        "Added weight (lbs; press Enter if none)",
+        allow_zero=True,
+        default=0,
+    )
+    is_bodyweight = weight_lbs == 0
     sets = ask_for_whole_number("Number of sets: ")
     reps_per_set = ask_for_whole_number("Reps per set: ")
 
@@ -353,6 +488,7 @@ def collect_exercise():
     return {
         "exercise_name": exercise_name,
         "weight_lbs": weight_lbs,
+        "is_bodyweight": is_bodyweight,
         "sets": sets,
         "reps_per_set": reps_per_set,
         "total_reps": total_reps,
@@ -372,13 +508,20 @@ def display_exercise(exercise):
     details = Table.grid(padding=(0, 2))
     details.add_column(style="dim")
     details.add_column(style="bold")
-    details.add_row("Weight", f"{format_weight(exercise['weight_lbs'])} lbs")
+    load_description = (
+        "Bodyweight"
+        if exercise["is_bodyweight"]
+        else f"{format_weight(exercise['weight_lbs'])} lbs added"
+    )
+    details.add_row("Load", load_description)
     details.add_row(
         "Sets × reps",
         f"{exercise['sets']} × {exercise['reps_per_set']}",
     )
     details.add_row("Total reps", str(exercise["total_reps"]))
-    details.add_row("Volume", f"{format_weight(exercise['volume_lbs'])} lbs")
+    details.add_row(
+        "Added-load volume", f"{format_weight(exercise['volume_lbs'])} lbs"
+    )
     console.print(
         Panel(
             details,
@@ -410,24 +553,30 @@ def get_or_create_session(user_id, session_name):
         ).fetchone()[0]
 
 
-def save_exercise(exercise, user_id, session_id):
+def save_exercise(exercise, user_id, session_id, replace_existing=False):
     """Save an exercise under the current user's named workout session."""
     created_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
     # The question marks are placeholders. Passing values separately keeps
     # user input safe and lets SQLite handle text and numbers correctly.
     with connect_to_database() as connection:
+        if replace_existing:
+            connection.execute(
+                "DELETE FROM workouts WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            )
         connection.execute(
             "\n"
             "            INSERT INTO workouts (\n"
-            "                exercise_name, weight_lbs, sets, reps_per_set,\n"
+            "                exercise_name, weight_lbs, is_bodyweight, sets, reps_per_set,\n"
             "                total_reps, volume_lbs, created_at, user_id, session_id\n"
             "            )\n"
-            "            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n"
+            "            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n"
             "            ",
             (
                 exercise["exercise_name"],
                 exercise["weight_lbs"],
+                int(exercise["is_bodyweight"]),
                 exercise["sets"],
                 exercise["reps_per_set"],
                 exercise["total_reps"],
@@ -442,13 +591,53 @@ def save_exercise(exercise, user_id, session_id):
 def add_workout(user):
     """Add one or more exercises to a named workout session."""
     session_name = ask_for_text("Workout name (for example, Push)")
-    session_id = get_or_create_session(user[0], session_name)
+    workout_date = datetime.now().astimezone().date().isoformat()
+    with connect_to_database() as connection:
+        existing_session = connection.execute(
+            """
+            SELECT id, session_name
+            FROM workout_sessions
+            WHERE user_id = ? AND session_name = ? COLLATE NOCASE
+              AND workout_date = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user[0], session_name, workout_date),
+        ).fetchone()
+
+    if existing_session:
+        existing_session_id, existing_session_name = existing_session
+        console.print(
+            f"A workout named {existing_session_name!r} already exists today. "
+            "Replacing it will remove its exercises.",
+            style="yellow",
+        )
+        if Prompt.ask(
+            "Replace today's workout?",
+            choices=["y", "n"],
+            default="n",
+        ) != "y":
+            console.print("Existing workout left unchanged.", style="cyan")
+            return
+        session_id = existing_session_id
+        session_name = existing_session_name
+        replace_existing = True
+    else:
+        session_id = get_or_create_session(user[0], session_name)
+        replace_existing = False
+
     console.print(Text(f"\n{session_name} workout", style="bold cyan"))
 
     while True:
         exercise = collect_exercise()
         display_exercise(exercise)
-        save_exercise(exercise, user[0], session_id)
+        save_exercise(
+            exercise,
+            user[0],
+            session_id,
+            replace_existing=replace_existing,
+        )
+        replace_existing = False
         console.print("Exercise saved to this workout.", style="bold green")
         if Prompt.ask(
             "Add another exercise to this workout?", choices=["y", "n"], default="n"
@@ -463,7 +652,7 @@ def view_saved_workouts(user):
         rows = connection.execute(
             """
             SELECT s.workout_date, s.session_name, w.exercise_name,
-                   w.weight_lbs, w.sets, w.reps_per_set,
+                   w.weight_lbs, w.is_bodyweight, w.sets, w.reps_per_set,
                    w.total_reps, w.volume_lbs
             FROM workouts AS w
             JOIN workout_sessions AS s ON s.id = w.session_id
@@ -487,16 +676,17 @@ def view_saved_workouts(user):
     table.add_column("Date", style="dim", no_wrap=True)
     table.add_column("Workout", style="bold")
     table.add_column("Exercise", style="bold")
-    table.add_column("Weight", justify="right")
+    table.add_column("Load", justify="right")
     table.add_column("Sets × Reps", justify="right")
     table.add_column("Total Reps", justify="right")
-    table.add_column("Volume", justify="right")
+    table.add_column("Added-load volume", justify="right")
 
     for (
         workout_date,
         session_name,
         exercise_name,
         weight,
+        is_bodyweight,
         sets,
         reps,
         reps_total,
@@ -506,7 +696,7 @@ def view_saved_workouts(user):
             workout_date,
             Text(session_name),
             Text(exercise_name),
-            f"{format_weight(weight)} lbs",
+            "Bodyweight" if is_bodyweight else f"{format_weight(weight)} lbs added",
             f"{sets} × {reps}",
             str(reps_total),
             f"{format_weight(volume)} lbs",
@@ -523,7 +713,7 @@ def view_saved_workouts(user):
     summary.add_row("Saved workouts", str(workout_count))
     summary.add_row("Saved exercises", str(len(rows)))
     summary.add_row("Total reps", str(total_reps))
-    summary.add_row("Total volume", f"{format_weight(total_volume)} lbs")
+    summary.add_row("Total added-load volume", f"{format_weight(total_volume)} lbs")
     console.print(Panel(summary, title="Workout Summary", border_style="green"))
 
 
@@ -626,7 +816,6 @@ def main():
     while True:
         user = get_or_create_user()
         display_profile(user)
-        console.print("Welcome to your Personal Gym Tracker!", style="bold green")
 
         while True:
             show_menu()
@@ -639,7 +828,7 @@ def main():
             elif choice == "2":
                 manage_workout_history(user)
             elif choice == "3":
-                display_profile(user)
+                user = view_profile(user)
             elif choice == "4":
                 console.print(
                     "Every rep counts. Keep pushing! 💪 See you next session.",
