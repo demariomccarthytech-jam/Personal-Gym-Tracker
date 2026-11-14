@@ -133,19 +133,6 @@ Through this project, I aim to improve my ability to:
 - Use Git and GitHub for version control.
 - Document and maintain a software project.
 
-  ## Last Update 11/5/2026
-
-New Features:
-
-Able to sign in to your user profile and create a new one if your new.
-Can manage workouts, delete and clear your workout history.
-
-Next steps:
-
-Being able to create a schedule.
-Also being able to add and modify old and new workouts.
-  
-
 
 ## 🚀 Final Goal
 
