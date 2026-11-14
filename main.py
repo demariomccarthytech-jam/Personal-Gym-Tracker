@@ -31,6 +31,7 @@ RETURNING_USER_GREETINGS = (
 # Store the database beside this Python file so it is easy to find and back up.
 # SQLite is included with Python, so it needs no separate dependency.
 DATABASE_PATH = Path(__file__).with_name("workouts.db")
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
 def connect_to_database():
@@ -87,6 +88,27 @@ def create_tables():
                 total_reps INTEGER NOT NULL,
                 volume_lbs REAL NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_days (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+                day_name TEXT NOT NULL,
+                UNIQUE(user_id, weekday)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_exercises (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_day_id INTEGER NOT NULL REFERENCES schedule_days(id) ON DELETE CASCADE,
+                exercise_name TEXT NOT NULL,
+                position INTEGER NOT NULL
             )
             """
         )
@@ -717,6 +739,242 @@ def view_saved_workouts(user):
     console.print(Panel(summary, title="Workout Summary", border_style="green"))
 
 
+def load_weekly_schedule(user_id):
+    """Return the user's planned day names and ordered exercises."""
+    with connect_to_database() as connection:
+        rows = connection.execute(
+            """
+            SELECT d.weekday, d.day_name, e.exercise_name
+            FROM schedule_days AS d
+            LEFT JOIN scheduled_exercises AS e ON e.schedule_day_id = d.id
+            WHERE d.user_id = ?
+            ORDER BY d.weekday, e.position, e.id
+            """,
+            (user_id,),
+        ).fetchall()
+    schedule = {weekday: {"name": "Rest Day", "exercises": []} for weekday in range(7)}
+    for weekday, day_name, exercise_name in rows:
+        schedule[weekday]["name"] = day_name
+        if exercise_name:
+            schedule[weekday]["exercises"].append(exercise_name)
+    return schedule
+
+
+def show_weekly_schedule(user):
+    """Display a clean weekly schedule."""
+    schedule = load_weekly_schedule(user[0])
+    table = Table(title=Text(f"{user[1]}'s Weekly Workout Schedule"), box=box.ROUNDED,
+                  header_style="bold cyan")
+    table.add_column("Day", style="bold", no_wrap=True)
+    table.add_column("Workout", style="cyan")
+    table.add_column("Exercises")
+    for weekday, day in enumerate(WEEKDAYS):
+        entry = schedule[weekday]
+        exercises = ", ".join(entry["exercises"]) or "—"
+        table.add_row(day, Text(entry["name"]), Text(exercises))
+    console.print(table)
+
+
+def manage_schedule_day(user, weekday):
+    """View and edit the selected weekday's workout plan."""
+    with connect_to_database() as connection:
+        connection.execute(
+            """INSERT INTO schedule_days (user_id, weekday, day_name)
+               VALUES (?, ?, 'Rest Day') ON CONFLICT(user_id, weekday) DO NOTHING""",
+            (user[0], weekday),
+        )
+        day_id, day_name = connection.execute(
+            "SELECT id, day_name FROM schedule_days WHERE user_id = ? AND weekday = ?",
+            (user[0], weekday),
+        ).fetchone()
+
+    while True:
+        with connect_to_database() as connection:
+            exercises = connection.execute(
+                "SELECT id, exercise_name FROM scheduled_exercises "
+                "WHERE schedule_day_id = ? ORDER BY position, id", (day_id,)
+            ).fetchall()
+        console.print(Text(f"\n{WEEKDAYS[weekday]} — {day_name}", style="bold cyan"))
+        if exercises:
+            for index, (_, exercise_name) in enumerate(exercises, 1):
+                console.print(Text(f"{index}. {exercise_name}"))
+        else:
+            console.print("No exercises planned.", style="dim")
+        action = Prompt.ask(
+            "1) Rename workout  2) Add exercise  3) Remove exercise  "
+            "4) Create workout for this day  5) Choose a saved workout  "
+            "6) Clear this day  7) Back",
+            choices=["1", "2", "3", "4", "5", "6", "7"],
+        )
+        if action == "7":
+            return
+        if action == "1":
+            day_name = ask_for_text("Workout name (for example, Push Day)")
+            with connect_to_database() as connection:
+                connection.execute(
+                    "UPDATE schedule_days SET day_name = ? WHERE id = ? AND user_id = ?",
+                    (day_name, day_id, user[0]),
+                )
+        elif action == "2":
+            if day_name == "Rest Day" and not exercises:
+                day_name = ask_for_text("Workout name (for example, Push Day)")
+                with connect_to_database() as connection:
+                    connection.execute(
+                        "UPDATE schedule_days SET day_name = ? WHERE id = ? AND user_id = ?",
+                        (day_name, day_id, user[0]),
+                    )
+            exercise_name = ask_for_text("Exercise name")
+            with connect_to_database() as connection:
+                position = connection.execute(
+                    "SELECT COALESCE(MAX(position), 0) + 1 FROM scheduled_exercises "
+                    "WHERE schedule_day_id = ?", (day_id,)
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO scheduled_exercises (schedule_day_id, exercise_name, position) "
+                    "VALUES (?, ?, ?)", (day_id, exercise_name, position)
+                )
+        elif action == "3":
+            if not exercises:
+                console.print("There are no exercises to remove.", style="yellow")
+                continue
+            choices = [str(index) for index in range(1, len(exercises) + 1)] + ["0"]
+            selected = Prompt.ask("Choose exercise to remove (0 to cancel)", choices=choices)
+            if selected != "0":
+                exercise_id = exercises[int(selected) - 1][0]
+                with connect_to_database() as connection:
+                    connection.execute(
+                        "DELETE FROM scheduled_exercises WHERE id = ? AND schedule_day_id = ?",
+                        (exercise_id, day_id),
+                    )
+        elif action == "4":
+            if (exercises or day_name != "Rest Day") and Prompt.ask(
+                "Replace the workout already planned for this day?",
+                choices=["y", "n"],
+                default="n",
+            ) != "y":
+                continue
+            day_name = ask_for_text("Workout name (for example, Leg Day)")
+            planned_exercises = []
+            while True:
+                planned_exercises.append(ask_for_text("Exercise name"))
+                if Prompt.ask(
+                    "Add another exercise?", choices=["y", "n"], default="n"
+                ) == "n":
+                    break
+            with connect_to_database() as connection:
+                connection.execute(
+                    "UPDATE schedule_days SET day_name = ? WHERE id = ? AND user_id = ?",
+                    (day_name, day_id, user[0]),
+                )
+                connection.execute(
+                    "DELETE FROM scheduled_exercises WHERE schedule_day_id = ?", (day_id,)
+                )
+                connection.executemany(
+                    "INSERT INTO scheduled_exercises (schedule_day_id, exercise_name, position) "
+                    "VALUES (?, ?, ?)",
+                    [(day_id, name, position) for position, name in enumerate(planned_exercises, 1)],
+                )
+            console.print(f"{day_name} added to {WEEKDAYS[weekday]}.", style="bold green")
+        elif action == "5":
+            with connect_to_database() as connection:
+                saved_workouts = connection.execute(
+                    """SELECT s.id, s.workout_date, s.session_name, COUNT(w.id)
+                       FROM workout_sessions AS s
+                       JOIN workouts AS w ON w.session_id = s.id AND w.user_id = s.user_id
+                       WHERE s.user_id = ?
+                       GROUP BY s.id
+                       ORDER BY s.workout_date DESC, s.id DESC""",
+                    (user[0],),
+                ).fetchall()
+            if not saved_workouts:
+                console.print("Save a workout with exercises first, then you can add it here.", style="yellow")
+                continue
+            console.print("\nYour saved workouts:")
+            for index, (_, workout_date, session_name, exercise_count) in enumerate(
+                saved_workouts, 1
+            ):
+                console.print(Text(
+                    f"{index}. {workout_date} — {session_name} ({exercise_count} exercises)"
+                ))
+            choices = [str(index) for index in range(1, len(saved_workouts) + 1)] + ["0"]
+            selected = Prompt.ask("Choose a workout to add to this day (0 to cancel)", choices=choices)
+            if selected == "0":
+                continue
+            session_id, _, saved_name, _ = saved_workouts[int(selected) - 1]
+            saved_name = saved_name.strip() or "Workout"
+            with connect_to_database() as connection:
+                saved_exercises = connection.execute(
+                    """SELECT w.exercise_name FROM workouts AS w
+                       JOIN workout_sessions AS s ON s.id = w.session_id
+                       WHERE s.user_id = ? AND w.user_id = ? AND s.id = ?
+                       ORDER BY w.id""",
+                    (user[0], user[0], session_id),
+                ).fetchall()
+            if (exercises or day_name != "Rest Day") and Prompt.ask(
+                "Replace the workout already planned for this day?",
+                choices=["y", "n"],
+                default="n",
+            ) != "y":
+                continue
+            with connect_to_database() as connection:
+                connection.execute(
+                    "UPDATE schedule_days SET day_name = ? WHERE id = ? AND user_id = ?",
+                    (saved_name, day_id, user[0]),
+                )
+                connection.execute(
+                    "DELETE FROM scheduled_exercises WHERE schedule_day_id = ?", (day_id,)
+                )
+                connection.executemany(
+                    "INSERT INTO scheduled_exercises (schedule_day_id, exercise_name, position) "
+                    "VALUES (?, ?, ?)",
+                    [(day_id, exercise[0], position) for position, exercise in enumerate(saved_exercises, 1)],
+                )
+            day_name = saved_name
+            console.print(f"{saved_name} added to {WEEKDAYS[weekday]}.", style="bold green")
+        elif action == "6":
+            if day_name == "Rest Day" and not exercises:
+                console.print("This day is already clear.", style="dim")
+                continue
+            if Prompt.ask(
+                f"Clear {WEEKDAYS[weekday]}'s workout and mark it as a rest day?",
+                choices=["y", "n"],
+                default="n",
+            ) == "y":
+                with connect_to_database() as connection:
+                    connection.execute(
+                        "DELETE FROM scheduled_exercises WHERE schedule_day_id = ?", (day_id,)
+                    )
+                    connection.execute(
+                        "UPDATE schedule_days SET day_name = 'Rest Day' "
+                        "WHERE id = ? AND user_id = ?",
+                        (day_id, user[0]),
+                    )
+                day_name = "Rest Day"
+                console.print(f"{WEEKDAYS[weekday]} is now a rest day.", style="green")
+
+
+def manage_weekly_schedule(user):
+    """Show and edit this user's weekly workout schedule."""
+    while True:
+        show_weekly_schedule(user)
+        action = Prompt.ask(
+            "Schedule: 1) Select a day to view/edit  2) Show weekly view  3) Back",
+            choices=["1", "2", "3"],
+        )
+        if action == "3":
+            return
+        if action == "2":
+            show_weekly_schedule(user)
+            continue
+        day_choice = Prompt.ask(
+            "Select a day: " + "  ".join(f"{i + 1}) {day}" for i, day in enumerate(WEEKDAYS))
+            + "  0) Back",
+            choices=[str(i) for i in range(8)],
+        )
+        if day_choice != "0":
+            manage_schedule_day(user, int(day_choice) - 1)
+
+
 def manage_workout_history(user):
     """View or delete workout sessions, or clear this user's history."""
     while True:
@@ -804,9 +1062,10 @@ def show_menu():
     menu.add_column()
     menu.add_row("1", "Add a workout")
     menu.add_row("2", "Manage workouts")
-    menu.add_row("3", "View profile")
-    menu.add_row("4", "Exit")
-    menu.add_row("5", "Sign out / switch user")
+    menu.add_row("3", "Manage weekly schedule")
+    menu.add_row("4", "View profile")
+    menu.add_row("5", "Exit")
+    menu.add_row("6", "Sign out / switch user")
     console.print(Panel(menu, title="Personal Gym Tracker", border_style="blue"))
 
 
@@ -820,7 +1079,7 @@ def main():
         while True:
             show_menu()
             choice = Prompt.ask(
-                "Choose an option", choices=["1", "2", "3", "4", "5"]
+                "Choose an option", choices=["1", "2", "3", "4", "5", "6"]
             )
 
             if choice == "1":
@@ -828,14 +1087,16 @@ def main():
             elif choice == "2":
                 manage_workout_history(user)
             elif choice == "3":
-                user = view_profile(user)
+                manage_weekly_schedule(user)
             elif choice == "4":
+                user = view_profile(user)
+            elif choice == "5":
                 console.print(
                     "Every rep counts. Keep pushing! 💪 See you next session.",
                     style="bold green",
                 )
                 return
-            elif choice == "5":
+            elif choice == "6":
                 console.print("Returning to sign in...", style="cyan")
                 break
 
